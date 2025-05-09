@@ -1,150 +1,175 @@
-import duckdb
+import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
 import calendar
-import streamlit as st
+import os
 
-DB_PATH = "scheduler.duckdb"
+# === FILE PATHS ===
+TASKS_FILE = "tasks.csv"
+LOG_FILE = "log.csv"
+SHOPPING_FILE = "shopping.csv"
 
-# Ensure tables exist
-@st.cache_resource
-def initialize_db():
-    with duckdb.connect(DB_PATH) as con:
-        con.execute("""
-        CREATE TABLE IF NOT EXISTS Tasks (
-            Task TEXT,
-            Assigned_To TEXT,
-            Done TEXT,
-            Frequency TEXT
-        )
-        """)
-        con.execute("""
-        CREATE TABLE IF NOT EXISTS RecurringLog (
-            Task TEXT,
-            Date_Done TEXT,
-            Assigned_To TEXT
-        )
-        """)
-        con.execute("""
-        CREATE TABLE IF NOT EXISTS Shopping (
-            Item TEXT,
-            Category TEXT,
-            Bought TEXT
-        )
-        """)
-    return DB_PATH
+# === HELPERS ===
+def load_csv(path, columns):
+    if not os.path.exists(path):
+        pd.DataFrame(columns=columns).to_csv(path, index=False)
+    return pd.read_csv(path)
 
-db_path = initialize_db()
+def save_csv(df, path):
+    df.to_csv(path, index=False)
 
-def get_tasks():
-    with duckdb.connect(db_path) as con:
-        return con.execute("SELECT * FROM Tasks").df()
+# === LOAD DATA ===
+task_df = load_csv(TASKS_FILE, ["Task", "Assigned_To", "Done", "Frequency"])
+log_df = load_csv(LOG_FILE, ["Task", "Date_Done", "Assigned_To"])
+shopping_df = load_csv(SHOPPING_FILE, ["Item", "Category", "Bought"])
 
-def get_log():
-    with duckdb.connect(db_path) as con:
-        return con.execute("SELECT * FROM RecurringLog").df()
-
-def get_shopping():
-    with duckdb.connect(db_path) as con:
-        return con.execute("SELECT * FROM Shopping").df()
-
-def add_shopping_item(item, category):
-    with duckdb.connect(db_path) as con:
-        con.execute("INSERT INTO Shopping VALUES (?, ?, 'FALSE')", (item, category))
-
-def update_shopping_status(item, status):
-    with duckdb.connect(db_path) as con:
-        con.execute("UPDATE Shopping SET Bought = ? WHERE Item = ?", (status, item))
-
-def log_recurring_completion(task_name, assigned, date_str):
-    with duckdb.connect(db_path) as con:
-        con.execute("INSERT INTO RecurringLog VALUES (?, ?, ?)", (task_name, date_str, assigned))
-
+# === UTILITY ===
 def get_last_done_date(task_name):
-    with duckdb.connect(db_path) as con:
-        df = con.execute("SELECT Date_Done FROM RecurringLog WHERE Task = ?", (task_name,)).df()
-        if df.empty:
-            return "Never"
-        return max(pd.to_datetime(df["Date_Done"])).strftime("%Y-%m-%d")
+    task_logs = log_df[log_df["Task"] == task_name]
+    if task_logs.empty:
+        return "Never"
+    return pd.to_datetime(task_logs["Date_Done"]).max().strftime("%Y-%m-%d")
 
-def task_already_exists(task_name, assigned):
-    with duckdb.connect(db_path) as con:
-        result = con.execute("""
-            SELECT * FROM Tasks
-            WHERE Task = ? AND Assigned_To = ?
-        """, (task_name, assigned)).fetchone()
-        return result is not None
+def log_completion(task_name, assigned):
+    global log_df
+    today_str = date.today().strftime("%Y-%m-%d")
+    log_df = pd.concat([log_df, pd.DataFrame([{
+        "Task": task_name, "Date_Done": today_str, "Assigned_To": assigned
+    }])], ignore_index=True)
+    save_csv(log_df, LOG_FILE)
 
 def refresh_recurring_tasks():
-    try:
-        task_df = get_tasks()
-        log_df = get_log()
-    except Exception as e:
-        st.warning("DuckDB read error. Skipping refresh.")
-        return
-
-    today = datetime.today().date()
+    global task_df
+    today = date.today()
     start_of_week = today - timedelta(days=today.weekday())
-    start_of_month = date(today.year, today.month, 1)
+    start_of_month = today.replace(day=1)
 
-    with duckdb.connect(db_path) as con:
-        for idx, row in task_df.iterrows():
-            freq = row.get("Frequency", "once").lower()
-            task_name = row["Task"]
-            assigned = row["Assigned_To"]
-            done_flag = row.get("Done", "FALSE").upper()
+    for i, row in task_df.iterrows():
+        freq = str(row["Frequency"]).lower()
+        task = row["Task"]
+        assigned = row["Assigned_To"]
+        done = row["Done"].upper()
 
-            if freq in ["once", "daily"]:
-                continue
+        if freq in ["once", "daily"]:
+            continue
 
-            relevant = log_df[log_df["Task"] == task_name]
-            if relevant.empty:
-                last_done = None
-            else:
-                last_done = max(pd.to_datetime(relevant["Date_Done"]))
+        task_logs = log_df[log_df["Task"] == task]
+        last_done = pd.to_datetime(task_logs["Date_Done"]).max() if not task_logs.empty else None
 
-            reset = False
-            if freq == "weekly" and (last_done is None or last_done.date() < start_of_week):
-                reset = True
-            elif freq == "monthly" and (last_done is None or last_done.date() < start_of_month):
-                reset = True
+        should_reset = False
+        if freq == "weekly" and (not last_done or last_done.date() < start_of_week):
+            should_reset = True
+        elif freq == "monthly" and (not last_done or last_done.date() < start_of_month):
+            should_reset = True
 
-            if reset and done_flag == "TRUE":
-                con.execute("""
-                    UPDATE Tasks SET Done = 'FALSE'
-                    WHERE Task = ? AND Assigned_To = ?
-                """, (task_name, assigned))
+        if should_reset and done == "TRUE":
+            task_df.at[i, "Done"] = "FALSE"
 
-# UI integration for shopping list
-if "Shopping" not in st.session_state:
-    st.session_state["Shopping"] = get_shopping()
+    save_csv(task_df, TASKS_FILE)
 
-st.subheader("🛒 Shopping List")
-shopping_df = st.session_state["Shopping"]
+refresh_recurring_tasks()
 
-categories = shopping_df["Category"].unique() if not shopping_df.empty else []
-selected_category = st.selectbox("Filter by category", ["All"] + list(categories))
+# === DATES ===
+today = date.today()
+start_of_week = today - timedelta(days=today.weekday())
+end_of_week = start_of_week + timedelta(days=6)
 
-filtered_shopping = shopping_df if selected_category == "All" else shopping_df[shopping_df["Category"] == selected_category]
+# === UI ===
+st.title("🏠 Home Scheduler")
 
-for i, row in filtered_shopping.iterrows():
+# === TASKS ===
+st.header("✅ Daily Tasks")
+for i, row in task_df[task_df["Frequency"].str.lower() == "daily"].iterrows():
+    task, assigned = row["Task"], row["Assigned_To"]
+    done_today = not log_df[(log_df["Task"] == task) & (log_df["Date_Done"] == today.strftime("%Y-%m-%d"))].empty
+    key = f"daily_{task}_{i}"
+    if done_today:
+        st.checkbox(f"~~{task}~~ (Assigned to {assigned}) ✅", value=True, disabled=True, key=key, help=f"Last done: {get_last_done_date(task)}")
+    else:
+        if st.checkbox(f"{task} (Assigned to {assigned})", key=key):
+            log_completion(task, assigned)
+            st.rerun()
+
+st.header("📆 Weekly Tasks")
+for i, row in task_df[task_df["Frequency"].str.lower() == "weekly"].iterrows():
+    task, assigned = row["Task"], row["Assigned_To"]
+    done_this_week = not log_df[(log_df["Task"] == task) & (pd.to_datetime(log_df["Date_Done"]) >= start_of_week)].empty
+    key = f"weekly_{task}_{i}"
+    if done_this_week:
+        st.checkbox(f"~~{task}~~ (Assigned to {assigned}) ✅", value=True, disabled=True, key=key, help=f"Last done: {get_last_done_date(task)}")
+    else:
+        if st.checkbox(f"{task} (Assigned to {assigned})", key=key, help=f"Last done: {get_last_done_date(task)}"):
+            log_completion(task, assigned)
+            task_df.at[i, "Done"] = "TRUE"
+            save_csv(task_df, TASKS_FILE)
+            st.rerun()
+
+st.header("📅 Monthly Tasks")
+for i, row in task_df[task_df["Frequency"].str.lower() == "monthly"].iterrows():
+    task, assigned = row["Task"], row["Assigned_To"]
+    this_month = pd.to_datetime(log_df["Date_Done"]).dt.month == today.month
+    done_this_month = not log_df[(log_df["Task"] == task) & this_month].empty
+    key = f"monthly_{task}_{i}"
+    if done_this_month:
+        st.checkbox(f"~~{task}~~ (Assigned to {assigned}) ✅", value=True, disabled=True, key=key, help=f"Last done: {get_last_done_date(task)}")
+    else:
+        if st.checkbox(f"{task} (Assigned to {assigned})", key=key, help=f"Last done: {get_last_done_date(task)}"):
+            log_completion(task, assigned)
+            task_df.at[i, "Done"] = "TRUE"
+            save_csv(task_df, TASKS_FILE)
+            st.rerun()
+
+st.header("❌ Missed 'Once' Tasks")
+for i, row in task_df[task_df["Frequency"].str.lower() == "once"].iterrows():
+    if row["Done"].upper() != "TRUE":
+        task, assigned = row["Task"], row["Assigned_To"]
+        key = f"missed_{task}_{i}"
+        if st.checkbox(f"🔔 {task} (Assigned to {assigned}) not done!", key=key):
+            task_df.at[i, "Done"] = "TRUE"
+            save_csv(task_df, TASKS_FILE)
+            st.rerun()
+
+st.header("➕ Add New Task")
+with st.form("add_task_form"):
+    new_task = st.text_input("Task")
+    new_freq = st.selectbox("Frequency", ["Daily", "Weekly", "Monthly", "Twice a Month", "Once"])
+    new_assigned = st.text_input("Assigned To")
+    submitted = st.form_submit_button("Add")
+    if submitted and new_task:
+        new_row = pd.DataFrame([[new_task, new_assigned, "FALSE", new_freq]], columns=task_df.columns)
+        task_df = pd.concat([task_df, new_row], ignore_index=True)
+        save_csv(task_df, TASKS_FILE)
+        st.success("Task added!")
+        st.rerun()
+
+# === SHOPPING ===
+st.header("🛒 Shopping List")
+
+if not shopping_df.empty:
+    categories = shopping_df["Category"].unique()
+    selected_cat = st.selectbox("Filter by category", ["All"] + list(categories))
+    view_df = shopping_df if selected_cat == "All" else shopping_df[shopping_df["Category"] == selected_cat]
+else:
+    view_df = shopping_df
+
+for i, row in view_df.iterrows():
     item = row["Item"]
     bought = row["Bought"] == "TRUE"
     key = f"shop_{item}_{i}"
-    new_state = st.checkbox(f"{item}", value=bought, key=key)
+    new_state = st.checkbox(item, value=bought, key=key)
     if new_state != bought:
-        update_shopping_status(item, "TRUE" if new_state else "FALSE")
-        st.session_state["Shopping"] = get_shopping()
-        st.experimental_rerun()
+        shopping_df.at[i, "Bought"] = "TRUE" if new_state else "FALSE"
+        save_csv(shopping_df, SHOPPING_FILE)
+        st.rerun()
 
 st.markdown("---")
-st.markdown("**Add New Item**")
-with st.form("add_shopping"):
-    new_item = st.text_input("Item")
-    category = st.text_input("Category")
-    submitted = st.form_submit_button("Add")
-    if submitted and new_item:
-        add_shopping_item(new_item, category)
+st.subheader("➕ Add Shopping Item")
+with st.form("add_item_form"):
+    item = st.text_input("Item")
+    cat = st.text_input("Category")
+    if st.form_submit_button("Add") and item:
+        new_row = pd.DataFrame([[item, cat, "FALSE"]], columns=shopping_df.columns)
+        shopping_df = pd.concat([shopping_df, new_row], ignore_index=True)
+        save_csv(shopping_df, SHOPPING_FILE)
         st.success("Item added!")
-        st.session_state["Shopping"] = get_shopping()
-        st.experimental_rerun()
+        st.rerun()
