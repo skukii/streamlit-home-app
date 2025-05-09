@@ -94,7 +94,8 @@ for i, row in task_df[task_df["Frequency"].str.lower() == "weekly"].iterrows():
     task = row["Task"]
     assigned = row["Assigned_To"]
     key = f"weekly_{task}_{i}"
-    done_this_week = not log_df[(log_df["Task"] == task) & (pd.to_datetime(log_df["Date_Done"]) >= start_of_week)].empty
+    log_dates = pd.to_datetime(log_df["Date_Done"]).dt.date
+    done_this_week = not log_df[(log_df["Task"] == task) & (log_dates >= start_of_month)].empty
     if done_this_week:
         st.checkbox(f"~~{task}~~ (Assigned to {assigned}) ✅", value=True, disabled=True, key=key, help=f"Last done: {get_last_done_date(task)}")
     else:
@@ -109,7 +110,9 @@ for i, row in task_df[task_df["Frequency"].str.lower() == "monthly"].iterrows():
     task = row["Task"]
     assigned = row["Assigned_To"]
     key = f"monthly_{task}_{i}"
-    done_this_month = not log_df[(log_df["Task"] == task) & this_month].empty
+    log_dates = pd.to_datetime(log_df["Date_Done"]).dt.date
+    done_this_month = not log_df[(log_df["Task"] == task) & (log_dates >= start_of_week)].empty
+
     if done_this_month:
         st.checkbox(f"~~{task}~~ (Assigned to {assigned}) ✅", value=True, disabled=True, key=key, help=f"Last done: {get_last_done_date(task)}")
     else:
