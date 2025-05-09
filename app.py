@@ -171,7 +171,7 @@ for i, row in filtered_shopping.iterrows():
     if new_state != bought:
         update_shopping_status(item, "TRUE" if new_state else "FALSE")
         st.session_state["Shopping"] = get_shopping()
-        st.experimental_rerun()
+        st.rerun()
 
 st.markdown("---")
 st.markdown("**Add New Item**")
@@ -183,4 +183,4 @@ with st.form("add_shopping"):
         add_shopping_item(new_item, category)
         st.success("Item added!")
         st.session_state["Shopping"] = get_shopping()
-        st.experimental_rerun()
+        st.rerun()
