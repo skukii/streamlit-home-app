@@ -105,36 +105,26 @@ for i, row in task_df[task_df["Frequency"].str.lower() == "weekly"].iterrows():
             st.rerun()
 
 st.header("📅 Monthly Tasks")
-log_dates = pd.to_datetime(log_df["Date_Done"]).dt.date
-done_this_month = not log_df[
-    (log_df["Task"] == task) &
-    (log_dates >= start_of_month)
-].empty
+start_of_month = date.today().replace(day=1)
 
 for i, row in task_df[task_df["Frequency"].str.lower() == "monthly"].iterrows():
     task = row["Task"]
     assigned = row["Assigned_To"]
     key = f"monthly_{task}_{i}"
+
     log_dates = pd.to_datetime(log_df["Date_Done"]).dt.date
-    done_this_month = not log_df[(log_df["Task"] == task) & (log_dates >= start_of_week)].empty
+    done_this_month = not log_df[
+        (log_df["Task"] == task) & (log_dates >= start_of_month)
+    ].empty
 
     if done_this_month:
         st.checkbox(f"~~{task}~~ (Assigned to {assigned}) ✅", value=True, disabled=True, key=key, help=f"Last done: {get_last_done_date(task)}")
     else:
-        if st.checkbox(f"{task} (Assigned to {assigned})", key=key):
+        if st.checkbox(f"{task} (Assigned to {assigned})", key=key, help=f"Last done: {get_last_done_date(task)}"):
             log_completion(task, assigned)
             st.session_state["task_df"].at[i, "Done"] = "TRUE"
             st.rerun()
 
-st.header("❌ Missed 'Once' Tasks")
-for i, row in task_df[task_df["Frequency"].str.lower() == "once"].iterrows():
-    if str(row["Done"]).upper() != "TRUE":
-        task = row["Task"]
-        assigned = row["Assigned_To"]
-        key = f"missed_{task}_{i}"
-        if st.checkbox(f"🔔 {task} (Assigned to {assigned}) not done!", key=key):
-            st.session_state["task_df"].at[i, "Done"] = "TRUE"
-            st.rerun()
 
 st.subheader("➕ Add New Task")
 with st.form("add_task_form"):
