@@ -1,152 +1,186 @@
-#streamlit run app.py
-import streamlit as st
-st.set_page_config(page_title="Home Scheduler", layout="wide")
-from datetime import datetime, date, timedelta
+import duckdb
 import pandas as pd
-import calendar as cal
-from streamlit_calendar import calendar
+from datetime import datetime, date, timedelta
+import calendar
+import streamlit as st
 
-from sheets_utils import (
-    get_sheet,
-    get_worksheet,
-    task_already_exists,
-    log_recurring_completion,
-    get_last_done_date,
-    refresh_recurring_tasks
+DB_PATH = "scheduler.duckdb"
+
+
+# Ensure tables exist
+@st.cache_resource
+def initialize_db():
+    with duckdb.connect(DB_PATH) as con:
+        con.execute(
+            """
+        CREATE TABLE IF NOT EXISTS Tasks (
+            Task TEXT,
+            Assigned_To TEXT,
+            Done TEXT,
+            Frequency TEXT
+        )
+        """
+        )
+        con.execute(
+            """
+        CREATE TABLE IF NOT EXISTS RecurringLog (
+            Task TEXT,
+            Date_Done TEXT,
+            Assigned_To TEXT
+        )
+        """
+        )
+        con.execute(
+            """
+        CREATE TABLE IF NOT EXISTS Shopping (
+            Item TEXT,
+            Category TEXT,
+            Bought TEXT
+        )
+        """
+        )
+    return DB_PATH
+
+
+db_path = initialize_db()
+
+
+def get_tasks():
+    with duckdb.connect(db_path) as con:
+        return con.execute("SELECT * FROM Tasks").df()
+
+
+def get_log():
+    with duckdb.connect(db_path) as con:
+        return con.execute("SELECT * FROM RecurringLog").df()
+
+
+def get_shopping():
+    with duckdb.connect(db_path) as con:
+        return con.execute("SELECT * FROM Shopping").df()
+
+
+def add_shopping_item(item, category):
+    with duckdb.connect(db_path) as con:
+        con.execute("INSERT INTO Shopping VALUES (?, ?, 'FALSE')", (item, category))
+
+
+def update_shopping_status(item, status):
+    with duckdb.connect(db_path) as con:
+        con.execute("UPDATE Shopping SET Bought = ? WHERE Item = ?", (status, item))
+
+
+def log_recurring_completion(task_name, assigned, date_str):
+    with duckdb.connect(db_path) as con:
+        con.execute(
+            "INSERT INTO RecurringLog VALUES (?, ?, ?)", (task_name, date_str, assigned)
+        )
+
+
+def get_last_done_date(task_name):
+    with duckdb.connect(db_path) as con:
+        df = con.execute(
+            "SELECT Date_Done FROM RecurringLog WHERE Task = ?", (task_name,)
+        ).df()
+        if df.empty:
+            return "Never"
+        return max(pd.to_datetime(df["Date_Done"])).strftime("%Y-%m-%d")
+
+
+def task_already_exists(task_name, assigned):
+    with duckdb.connect(db_path) as con:
+        result = con.execute(
+            """
+            SELECT * FROM Tasks
+            WHERE Task = ? AND Assigned_To = ?
+        """,
+            (task_name, assigned),
+        ).fetchone()
+        return result is not None
+
+
+def refresh_recurring_tasks():
+    try:
+        task_df = get_tasks()
+        log_df = get_log()
+    except Exception as e:
+        st.warning("DuckDB read error. Skipping refresh.")
+        return
+
+    today = datetime.today().date()
+    start_of_week = today - timedelta(days=today.weekday())
+    start_of_month = date(today.year, today.month, 1)
+
+    with duckdb.connect(db_path) as con:
+        for idx, row in task_df.iterrows():
+            freq = row.get("Frequency", "once").lower()
+            task_name = row["Task"]
+            assigned = row["Assigned_To"]
+            done_flag = row.get("Done", "FALSE").upper()
+
+            if freq in ["once", "daily"]:
+                continue
+
+            relevant = log_df[log_df["Task"] == task_name]
+            if relevant.empty:
+                last_done = None
+            else:
+                last_done = max(pd.to_datetime(relevant["Date_Done"]))
+
+            reset = False
+            if freq == "weekly" and (
+                last_done is None or last_done.date() < start_of_week
+            ):
+                reset = True
+            elif freq == "monthly" and (
+                last_done is None or last_done.date() < start_of_month
+            ):
+                reset = True
+
+            if reset and done_flag == "TRUE":
+                con.execute(
+                    """
+                    UPDATE Tasks SET Done = 'FALSE'
+                    WHERE Task = ? AND Assigned_To = ?
+                """,
+                    (task_name, assigned),
+                )
+
+
+# UI integration for shopping list
+if "Shopping" not in st.session_state:
+    st.session_state["Shopping"] = get_shopping()
+
+st.subheader("🛒 Shopping List")
+shopping_df = st.session_state["Shopping"]
+
+categories = shopping_df["Category"].unique() if not shopping_df.empty else []
+selected_category = st.selectbox("Filter by category", ["All"] + list(categories))
+
+filtered_shopping = (
+    shopping_df
+    if selected_category == "All"
+    else shopping_df[shopping_df["Category"] == selected_category]
 )
 
-@st.cache_data(ttl=300)
-def load_data():
-    sheet = get_sheet("HomeSchedulerData")
-    task_ws = get_worksheet(sheet, "Tasks")
-    log_ws = get_worksheet(sheet, "RecurringLog")
-    task_df = pd.DataFrame(task_ws.get_all_records())
-    done_df = pd.DataFrame(log_ws.get_all_records())
-    return sheet, task_ws, log_ws, task_df, done_df
+for i, row in filtered_shopping.iterrows():
+    item = row["Item"]
+    bought = row["Bought"] == "TRUE"
+    key = f"shop_{item}_{i}"
+    new_state = st.checkbox(f"{item}", value=bought, key=key)
+    if new_state != bought:
+        update_shopping_status(item, "TRUE" if new_state else "FALSE")
+        st.session_state["Shopping"] = get_shopping()
+        st.experimental_rerun()
 
-refresh_recurring_tasks()
-sheet, task_ws, log_ws, task_df, done_df = load_data()
-
-if not task_df.empty:
-    task_df["Done"] = task_df["Done"].astype(str).str.upper()
-if not done_df.empty:
-    done_df["Date Done"] = pd.to_datetime(done_df["Date Done"]).dt.date
-
-today = date.today()
-start_of_week = today - timedelta(days=today.weekday())
-end_of_week = start_of_week + timedelta(days=6)
-start_of_month = date(today.year, today.month, 1)
-end_of_month = date(today.year, today.month, cal.monthrange(today.year, today.month)[1])
-
-
-custom_css = """
-<style>
-.fc .fc-toolbar-title {
-    font-size: 1.3rem !important;
-    color: #ffffff;
-}
-.fc .fc-button {
-    background-color: #444;
-    border: none;
-    border-radius: 6px;
-    padding: 0.25rem 0.75rem;
-    margin: 2px;
-    color: #eee;
-    font-size: 0.9rem;
-}
-.fc .fc-button:hover {
-    background-color: #666;
-}
-.fc .fc-daygrid-day-number {
-    color: #eee;
-}
-.fc .fc-daygrid-day.fc-day-today {
-    background-color: rgba(255, 99, 132, 0.2) !important;
-    border-radius: 8px;
-}
-</style>
-"""
-
-st.markdown(custom_css, unsafe_allow_html=True)
-st.title("\U0001F3E1 Home Scheduler")
-
-col1, col2 = st.columns([2, 1])
-
-with col1:
-    st.subheader("\u2705 Daily Tasks")
-    daily_tasks = task_df[task_df["Frequency"].str.lower() == "daily"]
-    for i, row in daily_tasks.iterrows():
-        task_name = row["Task"]
-        assigned = row["Assigned To"]
-        key = f"daily_{task_name}_{i}"
-        done_today = not done_df[(done_df["Task"] == task_name) & (done_df["Date Done"] == today)].empty
-        if done_today:
-            last_done = get_last_done_date(task_name)
-            st.checkbox(f"~~{task_name}~~ (Assigned to {assigned}) ✅", value=True, disabled=True, key=key, help=f"Last done: {last_done}")
-        else:
-            st.checkbox(f"{task_name} (Assigned to {assigned})", value=False, key=key)
-
-    st.subheader("\U0001F4C6 Weekly Tasks")
-    weekly_tasks = task_df[task_df["Frequency"].str.lower() == "weekly"]
-    for i, row in weekly_tasks.iterrows():
-        task_name = row["Task"]
-        assigned = row["Assigned To"]
-        key = f"weekly_{task_name}_{i}"
-        recent_dones = done_df[(done_df["Task"] == task_name) & (done_df["Date Done"] >= start_of_week)]
-        last_done = get_last_done_date(task_name)
-        if not recent_dones.empty:
-            st.checkbox(f"~~{task_name}~~ (Assigned to {assigned}) ✅", value=True, disabled=True, key=key, help=f"Last done: {last_done}")
-        else:
-            st.checkbox(f"{task_name} (Assigned to {assigned})", value=False, key=key, help=f"Last done: {last_done}")
-
-    st.subheader("\U0001F4C5 Monthly Tasks")
-    monthly_tasks = task_df[task_df["Frequency"].str.lower() == "monthly"]
-    for i, row in monthly_tasks.iterrows():
-        task_name = row["Task"]
-        assigned = row["Assigned To"]
-        key = f"monthly_{task_name}_{i}"
-        recent_dones = done_df[(done_df["Task"] == task_name) & (done_df["Date Done"].dt.month == today.month) & (done_df["Date Done"].dt.year == today.year)]
-        last_done = get_last_done_date(task_name)
-        if not recent_dones.empty:
-            st.checkbox(f"~~{task_name}~~ (Assigned to {assigned}) ✅", value=True, disabled=True, key=key, help=f"Last done: {last_done}")
-        else:
-            st.checkbox(f"{task_name} (Assigned to {assigned})", value=False, key=key, help=f"Last done: {last_done}")
-
-    st.subheader("\u274C Missed Tasks")
-    once_tasks = task_df[task_df["Frequency"].str.lower() == "once"]
-    for i, row in once_tasks.iterrows():
-        if row["Done"] != "TRUE":
-            task_name = row["Task"]
-            assigned = row["Assigned To"]
-            key = f"missed_{task_name}_{i}"
-            st.checkbox(f"\U0001F514 {task_name} (Assigned to {assigned}) not done!", value=False, key=key)
-
-    st.subheader("\u2795 Add New Task")
-    with st.form("new_task"):
-        new_task = st.text_input("Task")
-        frequency = st.selectbox("Frequency", ["Daily", "Weekly", "Monthly", "Twice a Month", "Once"])
-        assigned_to = st.text_input("Assigned To")
-        submitted = st.form_submit_button("Add Task")
-
-        if submitted and new_task:
-            task_ws.append_row([new_task, assigned_to, "FALSE", frequency])
-            st.success("Task added!")
-            st.rerun()
-
-with col2:
-    st.subheader("\U0001F4C5 Calendar")
-    calendar(
-        options={
-            "initialView": "dayGridMonth",
-            "headerToolbar": {
-                "left": "prev,next today",
-                "center": "title",
-                "right": "dayGridMonth,timeGridWeek,timeGridDay"
-            },
-            "height": 600,
-            "weekends": True,
-            "nowIndicator": True,
-            "selectable": True
-        },
-        key="calendar"
-    )
+st.markdown("---")
+st.markdown("**Add New Item**")
+with st.form("add_shopping"):
+    new_item = st.text_input("Item")
+    category = st.text_input("Category")
+    submitted = st.form_submit_button("Add")
+    if submitted and new_item:
+        add_shopping_item(new_item, category)
+        st.success("Item added!")
+        st.session_state["Shopping"] = get_shopping()
+        st.experimental_rerun()
