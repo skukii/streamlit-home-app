@@ -2,7 +2,11 @@ import streamlit as st
 import pandas as pd
 from datetime import datetime, date, timedelta
 import calendar
+import gspread
+from oauth2client.service_account import ServiceAccountCredentials
+import json
 import os
+
 
 # === FILE PATHS ===
 TASKS_FILE = "tasks.csv"
@@ -17,6 +21,33 @@ def load_csv(path, columns):
 
 def save_csv(df, path):
     df.to_csv(path, index=False)
+
+def sync_to_google_sheets(task_df, log_df, shopping_df, sheet_name="HomeSchedulerData"):
+    try:
+        creds_dict = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
+        scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        client = gspread.authorize(creds)
+
+        sheet = client.open(sheet_name)
+
+        def upload_df_to_sheet(df, worksheet_name):
+            try:
+                worksheet = sheet.worksheet(worksheet_name)
+            except:
+                worksheet = sheet.add_worksheet(title=worksheet_name, rows="100", cols="20")
+            worksheet.clear()
+            worksheet.update([df.columns.values.tolist()] + df.values.tolist())
+
+        upload_df_to_sheet(task_df, "Tasks")
+        upload_df_to_sheet(log_df, "RecurringLog")
+        upload_df_to_sheet(shopping_df, "Shopping")
+
+        st.success("✅ Google Sheet successfully updated!")
+
+    except Exception as e:
+        st.error(f"❌ Failed to sync with Google Sheets: {e}")
+
 
 # === LOAD DATA ===
 task_df = load_csv(TASKS_FILE, ["Task", "Assigned_To", "Done", "Frequency"])
@@ -173,3 +204,8 @@ with st.form("add_item_form"):
         save_csv(shopping_df, SHOPPING_FILE)
         st.success("Item added!")
         st.rerun()
+        
+st.markdown("---")
+if st.button("📤 Update Google Sheet"):
+    sync_to_google_sheets(task_df, log_df, shopping_df)
+
