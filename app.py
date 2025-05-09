@@ -22,7 +22,7 @@ def load_csv(path, columns):
 def save_csv(df, path):
     df.to_csv(path, index=False)
 
-def sync_to_google_sheets(task_df, log_df, shopping_df, sheet_name="HomeSchedulerData"):
+def sync_to_google_sheets(task_df, log_df, shopping_df, sheet_name="Home Scheduler"):
     try:
         creds_dict = json.loads(st.secrets["GOOGLE_SERVICE_ACCOUNT_JSON"])
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
